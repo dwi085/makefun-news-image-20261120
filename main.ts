@@ -1,94 +1,97 @@
-// THE WORLD IN ONE DAY — Friday 20 November 2026.
-// One image that sums up the day's world news: 40 sourced stories, a UTC
-// timeline and a world map with pins. Node 22, standard library only.
-// Draws the whole front page with a tiny built-in 5x7 bitmap font and its
-// own PNG encoder (zlib + CRC32), then writes /output/entry.png.
-// Fully deterministic: same bytes on every run, no network, no clock.
+// THE WORLD IN ONE DAY — ROUND 2. Friday 20 November 2026 in one image:
+// 50 sourced stories, an 18-pin world map and a UTC timeline.
+// Node 22, standard library only. Draws the whole front page with a tiny
+// built-in 5x7 bitmap font and its own PNG encoder (zlib + CRC32), then
+// writes /output/entry.png. Fully deterministic: same bytes on every run,
+// no network, no clock, no randomness anywhere.
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const W = 1024;
 const H = 1024;
-const px = new Uint8Array(W * H * 3);
-
-const PAPER: [number, number, number] = [251, 248, 241];
-const INK: [number, number, number] = [17, 24, 39];
-const NAVY: [number, number, number] = [15, 42, 74];
-const RED: [number, number, number] = [180, 35, 24];
-const TEAL: [number, number, number] = [14, 116, 144];
-const GOLD: [number, number, number] = [183, 121, 31];
-const GREEN: [number, number, number] = [63, 125, 93];
-const GREY: [number, number, number] = [100, 106, 118];
-const LIGHT: [number, number, number] = [232, 228, 219];
-const OCEAN: [number, number, number] = [220, 233, 242];
-const WHITE: [number, number, number] = [255, 255, 255];
+const frame = new Uint8Array(W * H * 3);
 
 type RGB = [number, number, number];
+const PAPER: RGB = [251, 248, 241];
+const INK: RGB = [17, 24, 39];
+const NAVY: RGB = [15, 42, 74];
+const RED: RGB = [180, 35, 24];
+const TEAL: RGB = [14, 116, 144];
+const GOLD: RGB = [183, 121, 31];
+const GREEN: RGB = [63, 125, 93];
+const GREY: RGB = [100, 106, 118];
+const PALE: RGB = [232, 228, 219];
+const OCEAN: RGB = [220, 233, 242];
+const WHITE: RGB = [255, 255, 255];
 
-function setPixel(x: number, y: number, c: RGB): void {
+function put(x: number, y: number, c: RGB): void {
   if (x < 0 || y < 0 || x >= W || y >= H) return;
   const i = (y * W + x) * 3;
-  px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2];
+  frame[i] = c[0]; frame[i + 1] = c[1]; frame[i + 2] = c[2];
 }
 
-function fillRect(x: number, y: number, w: number, h: number, c: RGB): void {
-  for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) setPixel(i, j, c);
+function rect(x: number, y: number, w: number, h: number, c: RGB): void {
+  for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) put(i, j, c);
 }
 
-function fillCircle(cx: number, cy: number, r: number, c: RGB): void {
+function disc(cx: number, cy: number, r: number, c: RGB): void {
   for (let j = cy - r; j <= cy + r; j++) for (let i = cx - r; i <= cx + r; i++) {
-    if ((i - cx) * (i - cx) + (j - cy) * (j - cy) <= r * r) setPixel(i, j, c);
+    if ((i - cx) * (i - cx) + (j - cy) * (j - cy) <= r * r) put(i, j, c);
   }
 }
 
-function hline(x: number, y: number, w: number, c: RGB): void { fillRect(x, y, w, 1, c); }
-function vline(x: number, y: number, h: number, c: RGB): void { fillRect(x, y, 1, h, c); }
+function hRule(x: number, y: number, w: number, c: RGB): void { rect(x, y, w, 1, c); }
+function vRule(x: number, y: number, h: number, c: RGB): void { rect(x, y, 1, h, c); }
 
-// ---- PNG encoder (color type 2, 8-bit, filter 0) ----
-const CRC_TABLE: number[] = (() => {
-  const t: number[] = [];
+// ---- PNG writer: 8-bit RGB, no filter, zlib level 9 ----
+const CRC: number[] = (() => {
+  const table: number[] = [];
   for (let n = 0; n < 256; n++) {
     let c = n;
     for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-    t.push(c >>> 0);
+    table.push(c >>> 0);
   }
-  return t;
+  return table;
 })();
 
 function crc32(buf: Buffer): number {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (let i = 0; i < buf.length; i++) c = CRC[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function chunk(type: string, data: Buffer): Buffer {
+function pngChunk(type: string, data: Buffer): Buffer {
   const out = Buffer.alloc(12 + data.length);
   out.writeUInt32BE(data.length, 0);
   out.write(type, 4, 'ascii');
   data.copy(out, 8);
-  out.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, 'ascii'), data])), 8 + data.length);
+  const typeBuf = Buffer.from(type, 'ascii');
+  out.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 8 + data.length);
   return out;
 }
 
-function encodePNG(): Buffer {
+function writePNG(): Buffer {
   const raw = Buffer.alloc(H * (1 + W * 3));
   for (let y = 0; y < H; y++) {
     raw[y * (1 + W * 3)] = 0;
-    raw.set(px.subarray(y * W * 3, (y + 1) * W * 3), y * (1 + W * 3) + 1);
+    raw.set(frame.subarray(y * W * 3, (y + 1) * W * 3), y * (1 + W * 3) + 1);
   }
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
   ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
   const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0)),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', idat),
+    pngChunk('IEND', Buffer.alloc(0)),
   ]);
 }
 
-// ---- 5x7 bitmap font: each glyph is 7 rows of 5 bits (bit 4 = left pixel) ----
-const FONT: Record<string, number[]> = {
+// ---- 5x7 bitmap font: 7 rows of 5 bits each, bit 4 is the left pixel ----
+const GLYPHS: Record<string, number[]> = {
   A: [14, 17, 17, 31, 17, 17, 17], B: [30, 17, 17, 30, 17, 17, 30],
   C: [14, 17, 16, 16, 16, 17, 14], D: [30, 17, 17, 17, 17, 17, 30],
   E: [31, 16, 16, 30, 16, 16, 31], F: [31, 16, 16, 30, 16, 16, 16],
@@ -108,34 +111,6 @@ const FONT: Record<string, number[]> = {
   '6': [6, 8, 16, 30, 17, 17, 14], '7': [31, 1, 2, 4, 8, 8, 8],
   '8': [14, 17, 17, 14, 17, 17, 14], '9': [14, 17, 17, 15, 1, 2, 12],
   ' ': [0, 0, 0, 0, 0, 0, 0],
-};
-
-function glyphOf(ch: string): number[] {
-  const up = ch.toUpperCase();
-  return FONT[up] ?? PUNCT[up] ?? FONT[' '];
-}
-
-function drawChar(x: number, y: number, ch: string, s: number, c: RGB): void {
-  const g = glyphOf(ch);
-  for (let r = 0; r < 7; r++) for (let col = 0; col < 5; col++) {
-    if ((g[r] >> (4 - col)) & 1) fillRect(x + col * s, y + r * s, s, s, c);
-  }
-}
-
-function textWidth(text: string, s: number): number {
-  return text.length * 6 * s - s;
-}
-
-function drawText(x: number, y: number, text: string, s: number, c: RGB): void {
-  for (let i = 0; i < text.length; i++) drawChar(x + i * 6 * s, y, text[i], s, c);
-}
-
-function drawTextCentered(cx: number, y: number, text: string, s: number, c: RGB): void {
-  drawText(cx - Math.floor(textWidth(text, s) / 2), y, text, s, c);
-}
-
-// ---- punctuation glyphs ----
-const PUNCT: Record<string, number[]> = {
   '.': [0, 0, 0, 0, 0, 12, 12], ',': [0, 0, 0, 0, 12, 4, 8],
   ':': [0, 12, 12, 0, 12, 12, 0], ';': [0, 12, 12, 0, 12, 4, 8],
   '!': [4, 4, 4, 4, 4, 0, 4], '?': [14, 17, 1, 6, 4, 0, 4],
@@ -152,176 +127,209 @@ const PUNCT: Record<string, number[]> = {
   '~': [0, 0, 9, 22, 0, 0, 0], '•': [0, 0, 12, 12, 0, 0, 0],
 };
 
-// ---- The day's news: 40 stories, each with its source. ----
-// [headline, source] — every story first reported on Friday 20 Nov 2026.
+function drawGlyph(x: number, y: number, ch: string, s: number, c: RGB): void {
+  const g = GLYPHS[ch.toUpperCase()] ?? GLYPHS[' '];
+  for (let r = 0; r < 7; r++) for (let col = 0; col < 5; col++) {
+    if ((g[r] >> (4 - col)) & 1) rect(x + col * s, y + r * s, s, s, c);
+  }
+}
+
+function textW(text: string, s: number): number {
+  return text.length * 6 * s - s;
+}
+
+function drawStr(x: number, y: number, text: string, s: number, c: RGB): void {
+  for (let i = 0; i < text.length; i++) drawGlyph(x + i * 6 * s, y, text[i], s, c);
+}
+
+function drawStrC(cx: number, y: number, text: string, s: number, c: RGB): void {
+  drawStr(cx - Math.floor(textW(text, s) / 2), y, text, s, c);
+}
+
+// ---- The day's news: 50 stories, each with its source. ----
+// [headline, source] — every story reported in the 20 November 2026 news cycle.
 const STORIES: [string, string][] = [
   ['TRUMP, XI AND PUTIN HOLD FIRST THREE-WAY SUMMIT', 'TIMES OF INDIA'],
-  ['ICJ: MYANMAR LIKELY SOUGHT ROHINGYA DESTRUCTION', 'ICJ'],
+  ['ICJ: MYANMAR COMMITTED GENOCIDE OF ROHINGYA', 'BBC'],
   ['S. KOREA COURT OVERTURNS EX-PM HAN CONVICTION', 'TIMES OF INDIA'],
-  ['FIJI DECLARES DISASTER OVER DROUGHT, WATER SHORTAGE', 'FIJI GOVT'],
+  ['FIJI DECLARES DISASTER OVER DROUGHT, WATER CRISIS', 'FIJI GOVT'],
   ['N. KOREA EXPANDING YONGBYON ENRICHMENT PLANT', 'IAEA'],
-  ['US AND VENEZUELA TO RESTORE MILITARY COOPERATION', 'US DEFENCE DEPT'],
-  ['CYCLONE AKVAN LANDFALL: 300,000 EVACUATED IN ODISHA', 'IMD'],
+  ['US AND VENEZUELA TO RESTORE MILITARY TIES', 'US DEFENCE DEPT'],
+  ['CYCLONE AKVAN: 300,000 EVACUATED IN ODISHA', 'THE HINDU'],
   ['PHILLIPS 118 AS NZ REACH 317-6 IN WELLINGTON TEST', 'REUTERS'],
-  ['PHILLIPS: THREE-FORMAT TONS VS INDIA IN ONE YEAR', 'SPORTSKEEDA'],
-  ['TRUMP TO HOLD NOON NEWS CONFERENCE AT WHITE HOUSE', 'TRUTH SOCIAL'],
+  ['PHILLIPS: THREE-FORMAT TONS VS INDIA IN 2026', 'SPORTSKEEDA'],
+  ['TRUMP: NO RUSH ON IRAN CALL, SEE WHAT HAPPENS', 'REUTERS'],
   ['APEC LEADERS TALK TRADE AND TECH IN SHENZHEN', 'JAGRAN JOSH'],
-  ['PAKISTAN MINISTER TO LEAD DELEGATION TO DELHI', 'DAILY JAGRAN'],
-  ['AUSTRALIA SANCTIONS ISRAELI SETTLERS OVER WEST BANK', 'DAILY JAGRAN'],
+  ['TRUMP AND XI HOLD SHENZHEN TALKS, ACCOUNTS DIFFER', 'NYT'],
+  ['AUSTRALIA SANCTIONS ISRAELI SETTLERS IN WEST BANK', 'DAILY JAGRAN'],
   ['LPG TANKER THAT SANK OFF BULGARIA HIT BY PROJECTILES', 'DAILY JAGRAN'],
-  ['JAPAN PM TAKAICHI SEEKS CONTINUED DIALOGUE WITH CHINA', 'DAILY JAGRAN'],
-  ['COP31 DRAFT DROPS FOSSIL-FUEL TRANSITION LANGUAGE', 'GLOBAL DIASPORA NEWS'],
-  ['GUTERRES: TRIPLING ADAPTATION CASH STILL NOT ENOUGH', 'UN NEWS'],
-  ['GERMANY PLEDGES FREYJA RADARS FOR UKRAINE DEFENCE', 'UBN.NEWS'],
-  ['RUSSIAN STRIKES DAMAGE AUSTRIAN, DUTCH EMBASSIES IN KYIV', 'AFRINEWS'],
-  ['WALL ST SINKS: S&P -2.03%, DOW -1,103 AFTER ANTHROPIC DEBUT', 'REUTERS'],
-  ['FED MINUTES POINT TO DECEMBER HIKE; 94% ODDS', 'CME FEDWATCH'],
-  ['ANTHROPIC PRICES RECORD IPO AT $83 A SHARE', 'REUTERS'],
-  ['GOOGLE PUTS GEMINI 4 HYDROGEN INTO SEARCH WORLDWIDE', 'AI EVENT MAG'],
-  ['OPENAI RAISES $11BN AT $1.25 TRILLION VALUATION', 'AI EVENT MAG'],
-  ['EU BEGINS GPAI ENFORCEMENT UNDER AI ACT', 'AI EVENT MAG'],
-  ['NVIDIA LEADERSHIP CRISIS SPURS AI STOCK SELL-OFF', 'REUTERS'],
-  ['RABADA 8 WICKETS POWER SA TO 9-WICKET WIN OVER BANGLADESH', 'MYKHEL'],
-  ['INDIA BEAT PAKISTAN 2-1 TO WIN 10TH SAFF TITLE', 'STUDMENTOR'],
+  ['JAPAN PM TAKAICHI DUCKS TAIWAN QUESTION AT APEC', 'SIMPLELIFE.NEWS'],
+  ['COP31 CLOSES TODAY IN ANTALYA AFTER 12 DAYS', 'UN NEWS'],
+  ['GUTERRES: ADAPTATION CASH TRIPLING STILL NOT ENOUGH', 'UN NEWS'],
+  ['GERMANY PLEDGES FREYJA RADARS FOR UKRAINE', 'UBN.NEWS'],
+  ['RUSSIAN STRIKES DAMAGE EMBASSIES IN KYIV', 'THE INDEPENDENT'],
+  ['WALL ST SINKS: S AND P -2.02%, DOW -1,101', 'REUTERS'],
+  ['ANTHROPIC IPO: $83 A SHARE, $81BN RAISED', 'REUTERS'],
+  ['ANTHROPIC CLOSES AT $97 AFTER $115 PEAK', "BARRON'S"],
+  ['NVIDIA -40% FROM PEAK AS AI SELL-OFF DEEPENS', 'REUTERS'],
+  ['AMD -8% ON HUNTERBROOK EXPORT REPORT', 'M+ MARKET PULSE'],
+  ['VOYAGER 1 FIRST CRAFT A LIGHT-DAY FROM EARTH', 'NASA'],
+  ['HAYABUSA2 DROPS ASTEROID LANDING AFTER FAULT', 'SPACE.COM'],
+  ["GTA 6 SALES PASS THE ODYSSEY'S $1.8BN RUN", 'MEZHA'],
+  ['TAIWAN MOVES TO STEADY STOCKS; CURBS TODAY', 'SIMPLELIFE.NEWS'],
+  ['S. KOREA EXPORTS TOP $1 TRILLION FOR FIRST TIME', 'SIMPLELIFE.NEWS'],
   ['SENSEX JUMPS NEARLY 1,000 PTS TO 83,022', 'TIMES OF INDIA'],
-  ['MODI MEETS PRINCE AND PRINCESS OF WALES IN DELHI', 'TIMES OF INDIA'],
-  ['MODI OPENS FICCI CENTENARY CONVENTION IN DELHI', 'JAGRAN JOSH'],
-  ['FIRE AT EX-LEADER YUNUS ANCESTRAL HOME IN BANGLADESH', 'TIMES OF INDIA'],
+  ['MODI MEETS PRINCE AND PRINCESS OF WALES', 'TIMES OF INDIA'],
+  ['FIRE AT EX-LEADER YUNUS ANCESTRAL HOME', 'TIMES OF INDIA'],
   ['ELEVEN INDIAN STATES, UTS REACH FULL LITERACY', 'STUDMENTOR'],
   ['ADNOC VESSEL ATTACKED IN HORMUZ; ONE CREW MISSING', 'PW.LIVE'],
-  ['AGENTIC ENGINEERING DAYS SELL OUT IN ZURICH', 'AI EVENT MAG'],
-  ['WORLD CHILDRENS DAY MARKED AROUND THE GLOBE', 'UNICEF'],
+  ["WORLD CHILDREN'S DAY MARKED AROUND THE GLOBE", 'UNICEF'],
   ['AFRICA INDUSTRIALIZATION DAY OBSERVED', 'UNITED NATIONS'],
   ['57TH IFFI FILM FESTIVAL OPENS IN GOA', 'IFFI'],
   ['WINTER RAINS DEEPEN GAZA SHELTER CRISIS', 'UN NEWS'],
   ['SUDAN CIVIL WAR GRINDS ON INTO NOVEMBER', 'WARNPOINT'],
+  ["HOUTHI ATTACK DAMAGES RIYADH'S TALLEST TOWER", 'ARAB NEWS'],
+  ['US SENATE REJECTS IRAN WAR-POWERS BID 51-48', 'APPISTOS'],
+  ['TRUMP ANNOUNCES POSTHUMOUS PARDON FOR PETE ROSE', 'APPISTOS'],
+  ['HAITI OFFENSIVE KILLS 34 SUSPECTED GANG MEMBERS', 'NEWS.INBOX.LV'],
+  ['SERBIA: CUPIC ELECTED PARLIAMENT SPEAKER', 'APPISTOS'],
+  ['UK AND NORWAY FUND 100M-PLUS NAVAL CRAFT FOR KYIV', 'APPISTOS'],
+  ['APEC ADOPTS SHENZHEN OUTLOOK ON TRADE, DATA, AI', 'APPISTOS'],
+  ['ALCARAZ BEATS MEDVEDEV AT ATP FINALS IN TURIN', 'APEX SPORTS'],
+  ['FIROUZJA BEATS CARUANA, MEETS GIRI IN CHESS FINAL', 'APEX SPORTS'],
+  ["INDIA BEAT MALAYSIA 4-1 IN WOMEN'S HOCKEY OPENER", 'APEX SPORTS'],
+  ['GRIMES 47 PTS AS LAKERS WIN 9TH STRAIGHT IN OT', 'APEX SPORTS'],
 ];
 
-// ---- World map: stylised continents as filled blocks, pins as numbered dots ----
-const MAP = { x: 24, y: 222, w: 676, h: 100 };
+// ---- World map: stylised continents as filled blocks, 18 numbered pins ----
+// Map box: x 24..700, y 200..300. Equirectangular: lon -180..180, lat 75..-60.
+const MAP = { x: 24, y: 200, w: 676, h: 100 };
 const LAND: [number, number, number, number][] = [
-  [46, 226, 203, 15], [127, 241, 109, 18], [165, 259, 34, 8], [259, 222, 56, 11],
-  [212, 270, 84, 16], [222, 286, 60, 18], [238, 304, 28, 14],
-  [343, 232, 94, 19], [368, 226, 40, 10], [338, 234, 10, 10],
-  [332, 252, 126, 16], [340, 268, 100, 20], [358, 288, 60, 16],
-  [437, 222, 263, 18], [450, 240, 180, 20], [470, 260, 120, 14],
-  [468, 248, 26, 22], [450, 252, 28, 16], [545, 266, 64, 6],
-  [578, 288, 68, 16], [652, 232, 10, 16], [660, 296, 10, 14], [452, 286, 8, 14],
+  [46, 206, 150, 18], [70, 224, 130, 14], [90, 238, 60, 10], [225, 206, 30, 12],
+  [180, 250, 70, 16], [195, 266, 45, 18], [210, 284, 25, 14],
+  [348, 214, 8, 10], [350, 206, 80, 12], [360, 218, 55, 12],
+  [340, 232, 90, 16], [350, 248, 75, 18], [365, 266, 50, 16],
+  [440, 202, 200, 14], [450, 216, 180, 14], [470, 230, 130, 12],
+  [500, 232, 25, 20], [540, 242, 60, 8], [640, 218, 10, 18],
+  [580, 268, 65, 16], [678, 282, 8, 10],
 ];
-const PINS: [number, number, string][] = [
-  [114, 22.5, '1'], [4.3, 52, '2'], [127, 37.5, '3'], [178, -18, '4'],
-  [126, 39.8, '5'], [-67, 10.5, '6'], [85, 19.3, '7'], [174.8, -41.3, '8'],
-  [30.7, 36.9, '9'], [-77, 38.9, '10'], [30.5, 50.4, '11'], [34.5, 31.5, '12'],
+// [lon, lat, label, dx, dy] — dx/dy shift crowded dots away from their true spot.
+const PINS: [number, number, string, number, number][] = [
+  [114, 22.5, '1', 0, 0], [4.3, 52, '2', 0, -11], [127, 37.5, '3', 14, -12],
+  [178, -18, '4', -12, 0], [126, 39.8, '5', 0, 0], [-67, 10.5, '6', 0, 0],
+  [85, 19.3, '7', 0, 0], [174.8, -41.3, '8', 0, 0], [30.7, 36.9, '9', 0, 0],
+  [-77, 38.9, '10', 0, 0], [30.5, 50.4, '11', 0, -12], [34.5, 31.5, '12', 0, 12],
+  [46.7, 24.7, '13', 0, 0], [-74, 40.7, '14', 0, -12], [-118.1, 34.1, '15', 0, 0],
+  [-72.3, 18.5, '16', 12, 8], [7.7, 45.1, '17', 0, 0], [74, 15.3, '18', 0, 0],
 ];
-const PIN_NAMES: [string, string][] = [
-  ['1 SHENZHEN', '7 ODISHA'], ['2 THE HAGUE', '8 WELLINGTON'],
-  ['3 SEOUL', '9 ANTALYA'], ['4 SUVA, FIJI', '10 WASHINGTON'],
-  ['5 YONGBYON', '11 KYIV'], ['6 CARACAS', '12 GAZA'],
+const PIN_GUIDE: string[][] = [
+  ['1 SHENZHEN', '7 ODISHA', '13 RIYADH'],
+  ['2 THE HAGUE', '8 WELLINGTON', '14 NEW YORK'],
+  ['3 SEOUL', '9 ANTALYA', '15 PASADENA'],
+  ['4 SUVA', '10 WASHINGTON', '16 HAITI'],
+  ['5 YONGBYON', '11 KYIV', '17 TURIN'],
+  ['6 CARACAS', '12 GAZA', '18 GOA'],
 ];
-function mapX(lon: number): number { return MAP.x + Math.round((lon + 180) * MAP.w / 360); }
-function mapY(lat: number): number { return MAP.y + Math.round((75 - lat) * MAP.h / 135); }
+function lonToX(lon: number): number { return MAP.x + Math.round((lon + 180) * MAP.w / 360); }
+function latToY(lat: number): number { return MAP.y + Math.round((75 - lat) * MAP.h / 135); }
 
-// ---- UTC timeline: eight moments of the day ----
+// ---- UTC timeline: seven moments, times as reported in the 20 Nov cycle ----
 const TIMELINE: [string, string, string][] = [
-  ['00:10', 'KYIV', 'EMBASSIES HIT'],
   ['00:22', 'WELLINGTON', 'PHILLIPS 118'],
-  ['06:30', 'ODISHA', 'AKVAN LANDFALL'],
-  ['07:00', 'ANTALYA', 'COP31 FINAL DAY'],
-  ['09:00', 'WASHINGTON', 'US-KOREA TALKS'],
-  ['12:00', 'GOA', 'IFFI OPENS'],
+  ['01:30', 'TOKYO', 'HAYABUSA2 DROPS LANDING'],
+  ['01:43', 'ODISHA', 'AKVAN EVACUATIONS'],
+  ['02:30', 'WASHINGTON', 'PETE ROSE PARDON'],
+  ['03:06', 'WASHINGTON', 'TRUMP: NO IRAN RUSH'],
+  ['03:13', 'NEW DELHI', 'IRAN CALL TO 2027'],
   ['17:00', 'WASHINGTON', 'TRUMP PRESSER'],
-  ['20:00', 'SHENZHEN', 'APEC TALKS'],
 ];
 
-const BADGE_COLORS: RGB[] = [RED, NAVY, TEAL, GOLD];
+const BADGE: RGB[] = [RED, NAVY, TEAL, GOLD];
 
-function drawMasthead(): void {
-  fillRect(0, 0, W, 116, NAVY);
-  drawTextCentered(512, 16, 'THE WORLD IN ONE DAY', 4, WHITE);
-  drawTextCentered(512, 62, 'FRIDAY, 20 NOVEMBER 2026', 2, WHITE);
-  drawTextCentered(512, 94, '40 SOURCED STORIES  •  UTC TIMELINE  •  WORLD MAP', 1, [200, 210, 225]);
-  fillRect(0, 116, W, 4, RED);
+function paintMasthead(): void {
+  rect(0, 0, W, 100, NAVY);
+  drawStrC(512, 12, 'THE WORLD IN ONE DAY', 4, WHITE);
+  drawStrC(512, 54, 'FRIDAY, 20 NOVEMBER 2026', 2, WHITE);
+  drawStrC(512, 82, '50 SOURCED STORIES  •  18 PINS  •  UTC TIMELINE', 1, [200, 210, 225]);
+  rect(0, 100, W, 4, RED);
 }
 
-function drawLead(): void {
-  fillRect(16, 130, 62, 20, RED);
-  drawText(24, 135, 'LEAD', 1, WHITE);
-  drawText(92, 132, 'TRUMP, XI AND PUTIN MEET IN SHENZHEN', 2, INK);
-  drawText(16, 164, 'FIRST-EVER THREE-WAY SUMMIT: NUCLEAR ARMS, ENERGY AND ENDING WARS ON THE TABLE', 1, INK);
-  drawText(16, 180, 'APEC, SHENZHEN, CHINA - THE THREE LEADERS MET FACE TO FACE FOR THE FIRST TIME', 1, GREY);
-  drawText(880, 180, 'SOURCE: TIMES OF INDIA', 1, GREY);
-  hline(16, 200, 992, LIGHT);
+function paintLead(): void {
+  rect(16, 112, 62, 18, RED);
+  drawStr(24, 117, 'LEAD', 1, WHITE);
+  drawStr(92, 112, 'FIRST-EVER TRUMP-XI-PUTIN SUMMIT IN SHENZHEN', 2, INK);
+  drawStr(16, 140, 'THREE LEADERS SIGN JOINT PEACE DECLARATION AFTER 90-MINUTE TALKS', 1, INK);
+  drawStr(16, 156, 'APEC, SHENZHEN, CHINA - NUCLEAR ARMS, ENERGY AND ENDING WARS ON THE TABLE', 1, GREY);
+  drawStr(880, 156, 'SOURCE: NEW YORK TIMES', 1, GREY);
+  hRule(16, 172, 992, PALE);
 }
 
-function drawMap(): void {
-  drawText(16, 208, 'WHERE IT HAPPENED - WORLD MAP', 1, NAVY);
-  fillRect(MAP.x, MAP.y, MAP.w, MAP.h, OCEAN);
-  for (const [x, y, w, h] of LAND) fillRect(x, y, w, h, GREEN);
-  for (const [lon, lat, n] of PINS) {
-    const cx = mapX(lon), cy = mapY(lat);
-    // Seoul and Yongbyon are ~60 km apart: offset the Seoul dot so both read.
-    const dx = n === '3' ? 14 : 0;
-    const dy = n === '3' ? -12 : 0;
-    if (dx !== 0) hline(cx, cy - 12, 14, RED);
-    fillCircle(cx + dx, cy + dy, 7, RED);
-    drawText(cx + dx - (n.length === 2 ? 6 : 3), cy + dy - 3, n, 1, WHITE);
+function paintMap(): void {
+  drawStr(16, 182, 'WHERE IT HAPPENED - WORLD MAP', 1, NAVY);
+  drawStr(716, 182, 'PIN GUIDE', 1, NAVY);
+  rect(MAP.x, MAP.y, MAP.w, MAP.h, OCEAN);
+  for (const [x, y, w, h] of LAND) rect(x, y, w, h, GREEN);
+  for (const [lon, lat, n, dx, dy] of PINS) {
+    const cx = lonToX(lon);
+    const cy = latToY(lat);
+    if (dx !== 0 || dy !== 0) {
+      if (dy !== 0) vRule(cx, Math.min(cy, cy + dy), Math.abs(dy), RED);
+      if (dx !== 0) hRule(Math.min(cx, cx + dx), cy + dy, Math.abs(dx), RED);
+    }
+    disc(cx + dx, cy + dy, 6, RED);
+    drawStr(cx + dx - (n.length === 2 ? 6 : 3), cy + dy - 3, n, 1, WHITE);
   }
-  drawText(716, 208, 'PIN GUIDE', 1, NAVY);
-  PIN_NAMES.forEach(([a, b], i) => {
-    drawText(716, 228 + i * 16, a, 1, INK);
-    drawText(872, 228 + i * 16, b, 1, INK);
+  PIN_GUIDE.forEach((row, i) => {
+    row.forEach((cell, j) => drawStr(716 + j * 98, 204 + i * 16, cell, 1, INK));
   });
-  drawText(716, 330 - 8, '12 PLACES, 12 STORIES', 1, GREY);
-  hline(16, 336, 992, LIGHT);
+  hRule(16, 308, 992, PALE);
 }
 
-function drawTimeline(): void {
-  drawText(16, 346, 'THROUGH THE DAY - ALL TIMES UTC', 1, NAVY);
-  const y0 = 382;
-  hline(28, y0, 968, NAVY);
+function paintTimeline(): void {
+  drawStr(16, 316, 'THROUGH THE DAY - ALL TIMES UTC', 1, NAVY);
+  const y0 = 354;
+  hRule(48, y0, 928, NAVY);
   TIMELINE.forEach(([t, place, what], i) => {
-    const cx = 48 + i * 132;
-    fillCircle(cx, y0, 5, RED);
-    drawTextCentered(cx, 360, t, 1, RED);
-    drawTextCentered(cx, y0 + 10, place, 1, INK);
-    drawTextCentered(cx, y0 + 22, what, 1, GREY);
+    const cx = 64 + i * 144;
+    disc(cx, y0, 5, RED);
+    drawStrC(cx, 334, t, 1, RED);
+    drawStrC(cx, y0 + 10, place, 1, INK);
+    drawStrC(cx, y0 + 22, what, 1, GREY);
   });
-  hline(16, 414, 992, LIGHT);
+  hRule(16, 390, 992, PALE);
 }
 
-function drawStories(): void {
-  drawText(16, 424, 'THE DAY IN 40 STORIES - EACH WITH ITS SOURCE', 1, NAVY);
-  drawText(700, 424, 'HEADLINE - SOURCE', 1, GREY);
+function paintStories(): void {
+  drawStr(16, 398, 'THE DAY IN 50 STORIES - EACH WITH ITS SOURCE', 1, NAVY);
+  drawStr(700, 398, 'HEADLINE - SOURCE', 1, GREY);
   STORIES.forEach(([head, src], i) => {
-    const col = Math.floor(i / 20);
-    const row = i % 20;
+    const col = Math.floor(i / 25);
+    const row = i % 25;
     const x = 16 + col * 508;
-    const y = 448 + row * 27;
-    const c = BADGE_COLORS[i % 4];
-    fillRect(x, y, 22, 20, c);
-    drawText(x + 4, y + 7, String(i + 1), 1, WHITE);
-    const line = head + ' - ' + src;
-    drawText(x + 28, y + 7, line, 1, INK);
+    const y = 418 + row * 21;
+    rect(x, y, 22, 18, BADGE[i % 4]);
+    drawStr(x + 4, y + 6, String(i + 1), 1, WHITE);
+    drawStr(x + 28, y + 6, head + ' - ' + src, 1, INK);
   });
 }
 
-function drawFooter(): void {
-  fillRect(0, 984, W, 4, RED);
-  fillRect(0, 988, W, 36, NAVY);
-  drawTextCentered(512, 1000, 'ALL 40 STORIES FIRST REPORTED ON FRIDAY 20 NOVEMBER 2026 - TIMES UTC', 1, WHITE);
+function paintFooter(): void {
+  rect(0, 952, W, 4, RED);
+  rect(0, 956, W, 68, NAVY);
+  drawStrC(512, 984, '50 STORIES REPORTED IN THE 20 NOVEMBER 2026 NEWS CYCLE - ALL TIMES UTC', 1, WHITE);
 }
 
 function main(): void {
-  fillRect(0, 0, W, H, PAPER);
-  drawMasthead();
-  drawLead();
-  drawMap();
-  drawTimeline();
-  drawStories();
-  drawFooter();
+  rect(0, 0, W, H, PAPER);
+  paintMasthead();
+  paintLead();
+  paintMap();
+  paintTimeline();
+  paintStories();
+  paintFooter();
   const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'entry.png'), encodePNG());
+  writeFileSync(join(outDir, 'entry.png'), writePNG());
 }
 
 main();
